@@ -45,21 +45,20 @@ enum subscribe_action {
 struct callmaster;
 struct call;
 
-
+struct redis_endpoint;
+typedef struct redis_endpoint redis_endpoint_t;
 
 struct redis {
-	endpoint_t	endpoint;
-	char		host[64];
-	enum redis_role	role;
+	const redis_endpoint_t	*endpoint;
+	int			db;
+	enum redis_role		role;
 
-	redisContext	*ctx;
-	int		db;
-	const char	*auth;
-	mutex_t		lock;
-	unsigned int	pipeline;
+	redisContext		*ctx;
+	mutex_t			lock;
+	unsigned int		pipeline;
 
-	int		state;
-	int		no_redis_required;
+	int			state;
+	int			no_redis_required;
 };
 struct redis_hash {
 	redisReply *rr;
@@ -71,7 +70,12 @@ struct redis_list {
 	void **ptrs;
 };
 
-
+struct redis_endpoint {
+	char		host[64];
+	int		port;
+	int		db;
+	const char	*auth;
+};
 
 
 
@@ -105,7 +109,7 @@ INLINE gboolean g_hash_table_insert_check(GHashTable *h, gpointer k, gpointer v)
 void redis_notify_loop(void *d);
 
 
-struct redis *redis_new(const endpoint_t *, int, const char *, enum redis_role, int no_redis_required);
+struct redis *redis_new(const redis_endpoint_t *, enum redis_role, int no_redis_required);
 int redis_restore(struct callmaster *, struct redis *);
 void redis_update(struct call *, struct redis *);
 void redis_delete(struct call *, struct redis *);

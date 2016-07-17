@@ -62,8 +62,8 @@ static endpoint_t udp_listen_ep;
 static endpoint_t ng_listen_ep;
 static endpoint_t cli_listen_ep;
 static endpoint_t graphite_ep;
-static endpoint_t redis_ep;
-static endpoint_t redis_write_ep;
+static redis_endpoint_t redis_ep;
+static redis_endpoint_t redis_write_ep;
 static endpoint_t homer_ep;
 static int homer_protocol = SOCK_DGRAM;
 static int homer_id = 2001;
@@ -76,12 +76,8 @@ static unsigned int final_timeout;
 static int port_min = 30000;
 static int port_max = 40000;
 static int max_sessions = -1;
-static int redis_db = -1;
-static int redis_write_db = -1;
 static int redis_num_threads;
 static int no_redis_required;
-static char *redis_auth;
-static char *redis_write_auth;
 static char *b2b_url;
 static enum xmlrpc_format xmlrpc_fmt = XF_SEMS;
 static int num_threads;
@@ -227,18 +223,20 @@ static struct intf_config *if_addr_parse(char *s) {
 
 
 
-static int redis_ep_parse(endpoint_t *ep, int *db, char **auth, const char *auth_env, char *str) {
+static int redis_ep_parse(redis_endpoint_t *ep, const char *auth_env, char *str) {
 	char *sl;
 	long l;
+	unsigned int len;
+	const char *o;
 
 	sl = strchr(str, '@');
 	if (sl) {
 		*sl = 0;
-		*auth = str;
+		ep->auth = str;
 		str = sl+1;
 	}
 	else if ((sl = getenv(auth_env)))
-		*auth = sl;
+		ep->auth = sl;
 
 	sl = strchr(str, '/');
 	if (!sl)
@@ -252,9 +250,21 @@ static int redis_ep_parse(endpoint_t *ep, int *db, char **auth, const char *auth
 		return -1;
 	if (l < 0)
 		return -1;
-	*db = l;
-	if (endpoint_parse_any_full(ep, str))
-		return -1;
+	ep->db = l;
+
+	o = strrchr(str, ':');
+	if (o) {
+		len = o - str;
+		if (len >= sizeof(ep->host))
+			return -1;
+		ep->port = atoi(o+1);
+		if (ep->port > 0xffff)
+			return -1;
+	} else {
+		ep->port = 6379;
+	}
+	sprintf(ep->host, "%.*s", len, str);
+			
 	return 0;
 }
 
@@ -418,12 +428,11 @@ static void options(int *argc, char ***argv) {
 		final_timeout = 0;
 
 	if (redisps)
-		if (redis_ep_parse(&redis_ep, &redis_db, &redis_auth, "RTPENGINE_REDIS_AUTH_PW", redisps))
+		if (redis_ep_parse(&redis_ep, "RTPENGINE_REDIS_AUTH_PW", redisps))
 			die("Invalid Redis endpoint [IP:PORT/INT] (--redis)");
 
 	if (redisps_write)
-		if (redis_ep_parse(&redis_write_ep, &redis_write_db, &redis_write_auth,
-					"RTPENGINE_REDIS_WRITE_AUTH_PW", redisps_write))
+		if (redis_ep_parse(&redis_write_ep, "RTPENGINE_REDIS_WRITE_AUTH_PW", redisps_write))
 			die("Invalid Redis endpoint [IP:PORT/INT] (--redis-write)");
 
 	if (xmlrpc_fmt > 1)
@@ -642,19 +651,19 @@ no_kernel:
 	        die("Failed to open UDP CLI connection port");
 	}
 
-	if (!is_addr_unspecified(&redis_write_ep.address)) {
-		mc.redis_write = redis_new(&redis_write_ep, redis_write_db, redis_write_auth, ANY_REDIS_ROLE, no_redis_required);
+	if (redis_write_ep.port) {
+		mc.redis_write = redis_new(&redis_write_ep, ANY_REDIS_ROLE, no_redis_required);
 		if (!mc.redis_write)
-			die("Cannot start up without running Redis %s write database! See also NO_REDIS_REQUIRED paramter.",
-				endpoint_print_buf(&redis_write_ep));
+			die("Cannot start up without running Redis %s:%d/%d write database! See also NO_REDIS_REQUIRED paramter.",
+				redis_write_ep.host, redis_write_ep.port, redis_write_ep.db);
 	}
 
-	if (!is_addr_unspecified(&redis_ep.address)) {
-		mc.redis = redis_new(&redis_ep, redis_db, redis_auth, mc.redis_write ? ANY_REDIS_ROLE : MASTER_REDIS_ROLE, no_redis_required);
-		mc.redis_notify = redis_new(&redis_ep, redis_db, redis_auth, mc.redis_write ? ANY_REDIS_ROLE : MASTER_REDIS_ROLE, no_redis_required);
+	if (redis_ep.port) {
+		mc.redis = redis_new(&redis_ep, mc.redis_write ? ANY_REDIS_ROLE : MASTER_REDIS_ROLE, no_redis_required);
+		mc.redis_notify = redis_new(&redis_ep, mc.redis_write ? ANY_REDIS_ROLE : MASTER_REDIS_ROLE, no_redis_required);
 		if (!mc.redis || !mc.redis_notify)
-			die("Cannot start up without running Redis %s database! See also NO_REDIS_REQUIRED paramter.",
-				endpoint_print_buf(&redis_ep));
+			die("Cannot start up without running Redis %s:%d/%d database! See also NO_REDIS_REQUIRED paramter.",
+				redis_ep.host, redis_ep.port, redis_ep.db);
 
 		if (!mc.redis_write)
 			mc.redis_write = mc.redis;
@@ -704,7 +713,7 @@ int main(int argc, char **argv) {
 	thread_create_detach(sighandler, NULL);
 	thread_create_detach(poller_timer_loop, ctx.p);
 
-	if (!is_addr_unspecified(&redis_ep.address))
+	if (redis_ep.host)
 		thread_create_detach(redis_notify_loop, ctx.m);
 
 	if (!is_addr_unspecified(&graphite_ep.address))

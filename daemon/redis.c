@@ -149,15 +149,15 @@ static int redis_connect(struct redis *r, int wait) {
 
 	tv.tv_sec = 1;
 	tv.tv_usec = 0;
-	r->ctx = redisConnectWithTimeout(r->host, r->endpoint.port, tv);
+	r->ctx = redisConnectWithTimeout(r->endpoint->host, r->endpoint->port, tv);
 
 	if (!r->ctx)
 		goto err;
 	if (r->ctx->err)
 		goto err2;
 
-	if (r->auth) {
-		if (redisCommandNR(r->ctx, "AUTH %s", r->auth))
+	if (r->endpoint->auth) {
+		if (redisCommandNR(r->ctx, "AUTH %s", r->endpoint->auth))
 			goto err2;
 	}
 	else {
@@ -182,22 +182,22 @@ static int redis_connect(struct redis *r, int wait) {
 
 		if (!memcmp(s, "role:master", 9)) {
 			if (r->role == MASTER_REDIS_ROLE || r->role == ANY_REDIS_ROLE) {
-				ilog(LOG_INFO, "Connected to Redis %s in master mode", 
-					endpoint_print_buf(&r->endpoint));
+				ilog(LOG_INFO, "Connected to Redis %s:%d/%d in master mode", 
+					r->endpoint->host, r->endpoint->port, r->db);
 				goto done;
 			} else if (r->role == SLAVE_REDIS_ROLE) {
-				ilog(LOG_INFO, "Connected to Redis %s in master mode, but wanted mode is slave; retrying...",
-					endpoint_print_buf(&r->endpoint));
+				ilog(LOG_INFO, "Connected to Redis %s:%d/%d in master mode, but wanted mode is slave; retrying...",
+					r->endpoint->host, r->endpoint->port, r->db);
 				goto next;
 			}
 		} else if (!memcmp(s, "role:slave", 8)) {
 			if (r->role == SLAVE_REDIS_ROLE || r->role == ANY_REDIS_ROLE) {
-				ilog(LOG_INFO, "Connected to Redis %s in slave mode",
-					endpoint_print_buf(&r->endpoint));
+				ilog(LOG_INFO, "Connected to Redis %s:%d/%d in slave mode",
+					r->endpoint->host, r->endpoint->port, r->db);
 				goto done;
 			} else if (r->role == MASTER_REDIS_ROLE) {
-				ilog(LOG_INFO, "Connected to Redis %s in slave mode, but wanted mode is master; retrying...",
-					endpoint_print_buf(&r->endpoint));
+				ilog(LOG_INFO, "Connected to Redis %s:%d/%d in slave mode, but wanted mode is master; retrying...",
+					r->endpoint->host, r->endpoint->port, r->db);
 				goto next;
 			}
 		} else {
@@ -220,13 +220,13 @@ err3:
 	freeReplyObject(rp);
 err2:
 	if (r->ctx->err) {
-		rlog(LOG_ERR, "Failed to connect to Redis %s, error: %s",
-			endpoint_print_buf(&r->endpoint), r->ctx->errstr);
+		rlog(LOG_ERR, "Failed to connect to Redis %s:%d/%d, error: %s",
+			r->endpoint->host, r->endpoint->port, r->db, r->ctx->errstr);
 		return -1;
 	}
 err:
-	rlog(LOG_ERR, "Failed to connect to Redis %s",
-		endpoint_print_buf(&r->endpoint));
+	rlog(LOG_ERR, "Failed to connect to Redis %s:%d/%d",
+		r->endpoint->host, r->endpoint->port, r->db);
 	return -1;
 }
 
@@ -400,10 +400,11 @@ int redis_async_context_alloc(struct callmaster *cm) {
 
 	// get redis_notify database
 	r = cm->conf.redis_notify;
-	rlog(LOG_INFO, "Use Redis %s for notifications", endpoint_print_buf(&r->endpoint));
+	rlog(LOG_INFO, "Use Redis %s:%d/%d for notifications", 
+		r->endpoint->host, r->endpoint->port, r->db);
 
 	// alloc async context
-	cm->conf.redis_notify_async_context = redisAsyncConnect(r->host, r->endpoint.port);
+	cm->conf.redis_notify_async_context = redisAsyncConnect(r->endpoint->host, r->endpoint->port);
 	if (!cm->conf.redis_notify_async_context) {
 		rlog(LOG_ERROR, "redis_notify_async_context can't create new");
 		return -1;
@@ -538,7 +539,8 @@ static int redis_notify(struct callmaster *cm) {
 
 	// get redis_notify database
 	r = cm->conf.redis_notify;
-	rlog(LOG_INFO, "Use Redis %s to subscribe to notifications", endpoint_print_buf(&r->endpoint));
+	rlog(LOG_INFO, "Use Redis %s:%d/%d to subscribe to notifications", 
+		r->endpoint->host, r->endpoint->port, r->db);
 
 	// attach event base
 	if (redisLibeventAttach(cm->conf.redis_notify_async_context, cm->conf.redis_notify_event_base) == REDIS_ERR) {
@@ -637,15 +639,13 @@ void redis_notify_loop(void *d) {
 	redis_notify_event_base_action(cm, EVENT_BASE_FREE);
 }
 
-struct redis *redis_new(const endpoint_t *ep, int db, const char *auth, enum redis_role role, int no_redis_required) {
+struct redis *redis_new(const redis_endpoint_t *ep, enum redis_role role, int no_redis_required) {
 	struct redis *r;
 
 	r = g_slice_alloc0(sizeof(*r));
 
-	r->endpoint = *ep;
-	sockaddr_print(&ep->address, r->host, sizeof(r->host));
-	r->db = db;
-	r->auth = auth;
+	r->endpoint = ep;
+	r->db = r->endpoint->db;
 	r->role = role;
 	r->state = REDIS_STATE_DISCONNECTED;
 	r->no_redis_required = no_redis_required;
@@ -653,16 +653,16 @@ struct redis *redis_new(const endpoint_t *ep, int db, const char *auth, enum red
 
 	if (redis_connect(r, 10)) {
 		if (r->no_redis_required) {
-			rlog(LOG_WARN, "Starting with no initial connection to Redis %s !",
-				endpoint_print_buf(&r->endpoint));
+			rlog(LOG_WARN, "Starting with no initial connection to Redis %s:%d/%d !",
+				r->endpoint->host, r->endpoint->port, r->db);
 			return r;
 		}
 		goto err;
 	}
 
 	// redis is connected
-	rlog(LOG_INFO, "Established initial connection to Redis %s",
-		endpoint_print_buf(&r->endpoint));
+	rlog(LOG_INFO, "Established initial connection to Redis %s:%d/%d",
+		r->endpoint->host, r->endpoint->port, r->db);
 	r->state = REDIS_STATE_CONNECTED;
 	return r;
 
@@ -693,8 +693,8 @@ static int redis_check_conn(struct redis *r) {
 
 	// redis is disconnected
 	if (r->state == REDIS_STATE_CONNECTED) {
-		rlog(LOG_ERR, "Lost connection to Redis %s",
-			endpoint_print_buf(&r->endpoint));
+		rlog(LOG_ERR, "Lost connection to Redis %s:%d/%d",
+			r->endpoint->host, r->endpoint->port, r->db);
 		r->state = REDIS_STATE_DISCONNECTED;
 	}
 
@@ -706,8 +706,8 @@ static int redis_check_conn(struct redis *r) {
 
 	// redis is connected
 	if (r->state == REDIS_STATE_DISCONNECTED) {
-		rlog(LOG_INFO, "RE-Established connection to Redis %s",
-			endpoint_print_buf(&r->endpoint));
+		rlog(LOG_INFO, "RE-Established connection to Redis %s:%d/%d",
+			r->endpoint->host, r->endpoint->port, r->db);
 		r->state = REDIS_STATE_CONNECTED;
 	}
 
@@ -1556,7 +1556,7 @@ int redis_restore(struct callmaster *m, struct redis *r) {
 	mutex_init(&ctx.r_m);
 	g_queue_init(&ctx.r_q);
 	for (i = 0; i < m->conf.redis_num_threads; i++)
-		g_queue_push_tail(&ctx.r_q, redis_new(&r->endpoint, r->db, r->auth, r->role, r->no_redis_required));
+		g_queue_push_tail(&ctx.r_q, redis_new(r->endpoint, r->role, r->no_redis_required));
 	gtp = g_thread_pool_new(restore_thread, &ctx, m->conf.redis_num_threads, TRUE, NULL);
 
 	for (i = 0; i < calls->elements; i++) {
